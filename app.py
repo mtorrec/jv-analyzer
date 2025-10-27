@@ -200,7 +200,7 @@ def calculate_iv_params_per_file(area_lookup, visible_files=None):
             iv_bw = {'isc': 0, 'voc': 0, 'imp': 0, 'vmp': 0, 'ff': 0, 'pce': 0}
             iv_fw = {'isc': 0, 'voc': 0, 'imp': 0, 'vmp': 0, 'ff': 0, 'pce': 0, 'H': 0}
 
-        # Rs (BW)
+        # Rs (BW & FW)
         try:
             voc_bw = iv_bw['voc']; rng = 0.01
             mask = (bw_v > voc_bw - rng) & (bw_v < voc_bw + rng)
@@ -211,12 +211,23 @@ def calculate_iv_params_per_file(area_lookup, visible_files=None):
                 iv_bw['rs'] = np.nan
         except Exception:
             iv_bw['rs'] = np.nan
+        
+        try:
+            voc_fw = iv_fw['voc']; rng = 0.01
+            mask = (fw_v > voc_fw - rng) & (fw_v < voc_fw + rng)
+            if np.count_nonzero(mask) > 2:
+                slope, *_ = linregress(fw_v[mask], (fw_i[mask] / area))
+                iv_fw['rs'] = (1 / slope) * 1e3 if slope != 0 else np.inf
+            else:
+                iv_fw['rs'] = np.nan
+        except Exception:
+            iv_fw['rs'] = np.nan
 
         iv_list.append({
             'bw': iv_bw, 'fw': iv_fw,
             'filename': base,
             'group': next((g for g, meta in st.session_state.groups.items() if base in meta['files']), None),
-            'active_area_used': area
+            'active_area': area
         })
 
     bar.empty(); txt.empty()
@@ -244,17 +255,21 @@ def calculate_iv_params_per_file(area_lookup, visible_files=None):
     fig.add_vline(x=0, line_width=1, line_dash="dash", line_color="gray", opacity=0.5)
     fig.update_xaxes(range=[-0.1, 1.25]); fig.update_yaxes(range=[-25, 5])
 
-    # Build DataFrame, then rename isc -> jsc everywhere visible
+    # Build DataFrame, then rename isc -> jsc and imp -> jmp everywhere visible
     df = pd.json_normalize(iv_list).round(3)
     rename_map = {}
     for col in df.columns:
         if col.endswith('.isc') or col == 'isc':
             rename_map[col] = col.replace('isc', 'jsc')
+        if col.endswith('.imp') or col == 'imp':
+            rename_map[col] = col.replace('imp', 'jmp')
+        if col == 'fw.H':
+            rename_map[col] = 'H'
     df = df.rename(columns=rename_map)
     st.session_state.df = df
     return fig, df
 
-def create_statistics_plot(selected_params, num_columns):
+def create_statistics_plot(selected_params, num_columns, selected_groups=None):
     if not st.session_state.groups:
         st.warning('No groups defined.')
         return None
@@ -264,6 +279,15 @@ def create_statistics_plot(selected_params, num_columns):
     df = st.session_state.df
     if df is None or df.empty:
         st.warning('No analysis results available.')
+        return None
+
+    # Filter groups if specified
+    groups_to_plot = st.session_state.groups
+    if selected_groups:
+        groups_to_plot = {k: v for k, v in st.session_state.groups.items() if k in selected_groups}
+    
+    if not groups_to_plot:
+        st.warning('No groups selected.')
         return None
 
     # full-width layout across available columns
@@ -277,12 +301,17 @@ def create_statistics_plot(selected_params, num_columns):
         vertical_spacing=0.08, horizontal_spacing=0.06
     )
 
+    # Create consistent color mapping for ALL groups (so colors stay consistent)
+    group_names = list(st.session_state.groups.keys())
+    group_colors = get_color_palette(len(group_names))
+    color_map = dict(zip(group_names, group_colors))
+
     for idx, param_name in enumerate(selected_params):
         r = idx // cols + 1
         c = idx % cols + 1
 
-        # For each group, gather values and draw ONE box trace with overlaid points
-        for gname, meta in st.session_state.groups.items():
+        # For each group in groups_to_plot, gather values and draw ONE box trace with overlaid points
+        for gname, meta in groups_to_plot.items():
             files = set(meta['files'])
             vals = []
             for _, row in df.iterrows():
@@ -296,16 +325,18 @@ def create_statistics_plot(selected_params, num_columns):
             if not vals:
                 continue
 
-            # Box+whisker with scatter (no legend)
+            # Box+whisker with scatter using consistent group color
             fig.add_trace(
                 go.Box(
                     y=vals,
-                    x=[gname] * len(vals),     # category label shown on x-axis
-                    name=gname,                # used for x tick text (legend hidden)
-                    boxpoints='all',           # show points on top of box
+                    x=[gname] * len(vals),
+                    name=gname,
+                    boxpoints='all',
                     jitter=0.35,
-                    pointpos=0,                # center points
-                    marker=dict(size=5, opacity=0.6),
+                    pointpos=0,
+                    marker=dict(size=5, opacity=0.6, color=color_map[gname]),
+                    line=dict(color=color_map[gname]),
+                    fillcolor=color_map[gname].replace('rgb', 'rgba').replace(')', ',0.25)'),
                     showlegend=False
                 ),
                 row=r, col=c
@@ -313,21 +344,28 @@ def create_statistics_plot(selected_params, num_columns):
 
         fig.update_yaxes(title_text=param_name, row=r, col=c)
         fig.update_xaxes(categoryorder='array',
-                         categoryarray=list(st.session_state.groups.keys()),
+                         categoryarray=list(groups_to_plot.keys()),
                          row=r, col=c)
 
     fig.update_layout(
         height=max(420, 360 * rows),
         template='plotly_white',
-        showlegend=False,          # <-- hide legend entirely
+        showlegend=False,
         margin=dict(l=60, r=30, t=60, b=60)
     )
     return fig
 
 
 # ---------- UI ----------
-st.title('JV Curve Analysis')
+st.title("JV Curve Analysis")
+st.caption(
+    "Import IV `.txt` files containing two columns — voltage (V) and current (mA). "
+    "Assign groups and active areas, then calculate JV parameters under standard "
+    "test conditions (100 mW/cm², 1 sun)."
+)
 st.markdown('---')
+
+
 
 # Default active area (kept at top, used for first group + fallback)
 top1, = st.columns([1])
@@ -339,7 +377,7 @@ with top1:
         help="Used to initialize the first auto-created group and as a fallback for files without a group."
     )
 
-# Upload (auto-import). The small “X” now also removes from analysis
+# Upload (auto-import). The small "X" now also removes from analysis
 uploaded_files = st.file_uploader(
     "📁 Upload IV data files (auto-imports)",
     type=['txt'], accept_multiple_files=True, key='file_uploader'
@@ -353,7 +391,7 @@ if st.session_state.imported_data:
     st.info(f'📊 {len(st.session_state.imported_data)} file(s) loaded')
 
 # -------- Group Management (expander) --------
-with st.expander("👥 Group Management (per-group active area)"):
+with st.expander("Group management"):
     _ensure_default_group()
 
     g1, g2, g3 = st.columns([2, 1, 1])
@@ -389,10 +427,11 @@ with st.expander("👥 Group Management (per-group active area)"):
         with right:
             if sel_group:
                 all_bases = [d['base'] for d in st.session_state.imported_data]
+                # Use a dynamic key that includes the group name to reset state when group changes
                 assigned = st.multiselect('Assign files to this group',
                                           all_bases,
                                           default=st.session_state.groups[sel_group]['files'],
-                                          key='assign_files_box')
+                                          key=f'assign_files_box_{sel_group}')
                 if st.button('➕ Update assignments', use_container_width=True, key='update_assign'):
                     st.session_state.groups[sel_group]['files'] = list(dict.fromkeys(assigned))
                     _auto_calculate()
@@ -411,36 +450,47 @@ with st.expander("👥 Group Management (per-group active area)"):
 st.markdown('---')
 
 # ---------- Tabs ----------
-tab1, tab2, tab3 = st.tabs(['📊 JV Analysis', '📈 Statistics', '📥 Export'])
+tab1, tab2, tab3 = st.tabs(['☀️ JV Analysis', '📊 Statistics', '📥 Export'])
 
 with tab1:
     if st.session_state.imported_data:
         all_files_with_ext = [d['filename'] for d in st.session_state.imported_data]
-        st.markdown('**Select files to analyze (uses each file’s group active area):**')
+        st.markdown("**Select files to analyze (uses the active area for each file's group):**")
         selected_for_analysis = st.multiselect('Files', all_files_with_ext, default=all_files_with_ext, label_visibility='collapsed')
 
         if st.button('Analyze', type='primary'):
             with st.spinner('Calculating IV parameters...'):
                 fig, df = calculate_iv_params_per_file(_build_area_lookup(), selected_for_analysis)
                 if fig is not None and df is not None:
+                    st.session_state.jv_fig = fig  # Store the figure in session state
                     st.plotly_chart(fig, use_container_width=True)
                     st.markdown('Results Table')
                     st.dataframe(df, use_container_width=True, height=400)
         elif st.session_state.df is not None:
             st.info('Showing previous results. Click "Analyze" to recalculate.')
+            # Show the stored figure if available
+            if 'jv_fig' in st.session_state and st.session_state.jv_fig:
+                st.plotly_chart(st.session_state.jv_fig, use_container_width=True)
+            st.markdown('Results Table')
+            st.dataframe(st.session_state.df, use_container_width=True, height=400)
     else:
         st.info('Upload data files to begin analysis.')
 
 with tab2:
     if st.session_state.df is not None and st.session_state.groups:
-        # full-width placeholder for the chart (must be created BEFORE the button)
-        stats_plot_area = st.empty()
-
+        # Group filter
+        all_groups = list(st.session_state.groups.keys())
+        selected_groups = st.multiselect(
+            '**Select groups to display:**',
+            all_groups,
+            default=all_groups,
+            key='stats_group_filter'
+        )
         # Controls row
         c1, c2 = st.columns([3, 1])
         with c1:
             params = [c for c in st.session_state.df.columns
-                      if c not in ('filename', 'group', 'active_area_used')]
+                      if c not in ('filename', 'group', 'active_area')]
             picked = st.multiselect(
                 '**Select parameters to plot by group:**',
                 params,
@@ -450,10 +500,13 @@ with tab2:
             ncols = st.number_input('Columns', min_value=1, max_value=5, value=2)
             plot_stats = st.button('📊 Plot Statistics', type='primary', use_container_width=True)
 
+        # full-width placeholder for the chart (AFTER the controls)
+        stats_plot_area = st.empty()
+
         # Create or show plot in the FULL-WIDTH placeholder
         if plot_stats and picked:
             with st.spinner('Creating statistics plots...'):
-                fig = create_statistics_plot(picked, ncols)
+                fig = create_statistics_plot(picked, ncols, selected_groups)
                 if fig:
                     st.session_state.stats_fig = fig   # persist across reruns
                     stats_plot_area.plotly_chart(fig, use_container_width=True)
@@ -465,9 +518,9 @@ with tab2:
                 st.info('Pick parameters and click "Plot Statistics".')
 
     elif not st.session_state.groups:
-        st.info('👈 Add a group in “Group Management” to view statistics.')
+        st.info('Add a group in "Group management" to view statistics.')
     else:
-        st.info('👈 Run JV Analysis first.')
+        st.info('Run JV Analysis first.')
 
 
 with tab3:
@@ -489,4 +542,4 @@ with tab3:
                                mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
                                use_container_width=True)
     else:
-        st.info('👈 Run JV Analysis to generate exportable results.')
+        st.info('Run JV Analysis to generate exportable results.')
