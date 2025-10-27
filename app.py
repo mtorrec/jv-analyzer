@@ -359,7 +359,7 @@ def create_statistics_plot(selected_params, num_columns, selected_groups=None):
 # ---------- UI ----------
 st.title("JV Curve Analysis")
 st.caption(
-    "Import IV `.txt` files containing two columns — voltage (V) and current (mA). "
+    "Import IV `.txt` files containing two columns — voltage (V) and current (mA), for two scans — BW and FW, in that order. "
     "Assign groups and active areas, then calculate JV parameters under standard "
     "test conditions (100 mW/cm², 1 sun)."
 )
@@ -543,3 +543,4 @@ with tab3:
                                use_container_width=True)
     else:
         st.info('Run JV Analysis to generate exportable results.')
+
