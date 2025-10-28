@@ -18,6 +18,8 @@ except ImportError:
 st.set_page_config(page_title="JV Curve Analysis", layout="wide", page_icon="⚡")
 
 # ---------- Session state ----------
+if 'plot_mode' not in st.session_state:
+    st.session_state.plot_mode = 'JV'
 if 'imported_data' not in st.session_state:
     st.session_state.imported_data = []  # {filename, base, data}
 if 'groups' not in st.session_state:
@@ -127,7 +129,7 @@ def sync_with_uploader(uploaded_files):
             st.session_state.groups[g]['files'] = [b for b in st.session_state.groups[g]['files'] if b != base]
     _auto_calculate()
 
-def calculate_iv_params_per_file(area_lookup, visible_files=None):
+def calculate_iv_params_per_file(area_lookup, visible_files=None, plot_mode='JV'):
     if not st.session_state.imported_data:
         st.warning('No data imported yet.')
         return None, None
@@ -146,6 +148,9 @@ def calculate_iv_params_per_file(area_lookup, visible_files=None):
     bar = st.progress(0.0)
     txt = st.empty()
 
+    # Track PV range if needed
+    pv_min, pv_max = None, None
+
     for idx, d in enumerate(data):
         bar.progress((idx + 1) / len(data))
         txt.text(f'Analyzing {idx + 1}/{len(data)}: {d["filename"]}')
@@ -158,66 +163,102 @@ def calculate_iv_params_per_file(area_lookup, visible_files=None):
             area = st.session_state.default_area
 
         color = colors[idx]
+        # Current density [mA/cm²]
         j_bw, j_fw = bw_i / area, fw_i / area
 
-        # curves
+        # Choose what to plot on Y
+        if plot_mode == 'PV':
+            # Power density [mW/cm²] = -J * V (delivered power positive in 4th quadrant)
+            p_bw = -j_bw * bw_v
+            p_fw = -j_fw * fw_v
+            y_bw, y_fw = p_bw, p_fw
+            y_title = 'Power density / mW cm⁻²'
+            hover_tmpl = 'V: %{x:.3f} V<br>P: %{y:.3f} mW/cm²<extra></extra>'
+
+            # Update PV global min/max for autoscaling
+            cur_min = float(np.nanmin([np.nanmin(p_bw), np.nanmin(p_fw)])) if len(p_bw) and len(p_fw) else None
+            cur_max = float(np.nanmax([np.nanmax(p_bw), np.nanmax(p_fw)])) if len(p_bw) and len(p_fw) else None
+            if cur_min is not None and cur_max is not None:
+                pv_min = cur_min if pv_min is None else min(pv_min, cur_min)
+                pv_max = cur_max if pv_max is None else max(pv_max, cur_max)
+        else:
+            y_bw, y_fw = j_bw, j_fw
+            y_title = 'Current / mA cm⁻²'
+            hover_tmpl = 'V: %{x:.3f} V<br>J: %{y:.3f} mA/cm²<extra></extra>'
+
+        # Curves
         fig.add_trace(go.Scatter(
-            x=bw_v, y=j_bw, mode='lines', name=f'{base} (BW)',
+            x=bw_v, y=y_bw, mode='lines', name=f'{base} (BW)',
             line=dict(color=color, width=2), legendgroup=base,
-            hovertemplate='V: %{x:.3f} V<br>J: %{y:.3f} mA/cm²<extra></extra>'
+            hovertemplate=hover_tmpl
         ))
         fig.add_trace(go.Scatter(
-            x=fw_v, y=j_fw, mode='lines', name=f'{base} (FW)',
+            x=fw_v, y=y_fw, mode='lines', name=f'{base} (FW)',
             line=dict(color=color, width=2, dash='dash'), legendgroup=base,
-            hovertemplate='V: %{x:.3f} V<br>J: %{y:.3f} mA/cm²<extra></extra>'
+            hovertemplate=hover_tmpl
         ))
 
+        # IV parameters & markers
         try:
+            # IV_Params expects current density [mA/cm²] as positive flowing out of device -> use (-i/area)
             iv_bw = IV_Params(bw_v, bw_i * -1 / area).calc_iv_params()
             iv_bw['pce'] = iv_bw['isc'] * iv_bw['voc'] * iv_bw['ff'] / 100
             iv_fw = IV_Params(fw_v, fw_i * -1 / area).calc_iv_params()
             iv_fw['pce'] = iv_fw['isc'] * iv_fw['voc'] * iv_fw['ff'] / 100
             iv_fw['H'] = (iv_bw['pce'] - iv_fw['pce']) / iv_bw['pce'] if iv_bw['pce'] else 0
 
-            # key points (label as Jsc/Voc/MPP)
-            fig.add_trace(go.Scatter(
-                x=[0, 0], y=[iv_bw['isc'] * -1, iv_fw['isc'] * -1],
-                mode='markers', marker=dict(color=color, size=8),
-                showlegend=False, legendgroup=base, hovertemplate='Jsc<extra></extra>'
-            ))
-            fig.add_trace(go.Scatter(
-                x=[iv_bw['voc'], iv_fw['voc']], y=[0, 0],
-                mode='markers', marker=dict(color=color, size=8),
-                showlegend=False, legendgroup=base, hovertemplate='Voc<extra></extra>'
-            ))
-            fig.add_trace(go.Scatter(
-                x=[iv_bw['vmp'], iv_fw['vmp']], y=[iv_bw['imp'] * -1, iv_fw['imp'] * -1],
-                mode='markers', marker=dict(color=color, size=8),
-                showlegend=False, legendgroup=base, hovertemplate='MPP<extra></extra>'
-            ))
+            if plot_mode == 'JV':
+                # Jsc markers (at V=0, J = -isc)
+                fig.add_trace(go.Scatter(
+                    x=[0, 0], y=[iv_bw['isc'] * -1, iv_fw['isc'] * -1],
+                    mode='markers', marker=dict(color=color, size=8),
+                    showlegend=False, legendgroup=base, hovertemplate='Jsc<extra></extra>'
+                ))
+                # Voc markers (at J=0)
+                fig.add_trace(go.Scatter(
+                    x=[iv_bw['voc'], iv_fw['voc']], y=[0, 0],
+                    mode='markers', marker=dict(color=color, size=8),
+                    showlegend=False, legendgroup=base, hovertemplate='Voc<extra></extra>'
+                ))
+                # MPP markers on J–V (Jmp = -imp)
+                fig.add_trace(go.Scatter(
+                    x=[iv_bw['vmp'], iv_fw['vmp']], y=[iv_bw['imp'] * -1, iv_fw['imp'] * -1],
+                    mode='markers', marker=dict(color=color, size=8),
+                    showlegend=False, legendgroup=base, hovertemplate='MPP (J)<extra></extra>'
+                ))
+            else:
+                # MPP markers on P–V
+                # imp from IV_Params is +J_out, so Pmp = Vmp * imp  (no minus)
+                pmp_bw = iv_bw['vmp'] * iv_bw['imp']  # mW/cm²
+                pmp_fw = iv_fw['vmp'] * iv_fw['imp']
+                fig.add_trace(go.Scatter(
+                    x=[iv_bw['vmp'], iv_fw['vmp']], y=[pmp_bw, pmp_fw],
+                    mode='markers', marker=dict(color=color, size=8),
+                    showlegend=False, legendgroup=base, hovertemplate='MPP (P)<extra></extra>'
+                ))
         except Exception as e:
             st.warning(f'⚠️ Error calculating parameters for {base}: {e}')
             iv_bw = {'isc': 0, 'voc': 0, 'imp': 0, 'vmp': 0, 'ff': 0, 'pce': 0}
             iv_fw = {'isc': 0, 'voc': 0, 'imp': 0, 'vmp': 0, 'ff': 0, 'pce': 0, 'H': 0}
 
-        # Rs (BW & FW)
+        # Series resistance estimates near Voc (both scans)
         try:
             voc_bw = iv_bw['voc']; rng = 0.01
             mask = (bw_v > voc_bw - rng) & (bw_v < voc_bw + rng)
             if np.count_nonzero(mask) > 2:
-                slope, *_ = linregress(bw_v[mask], (bw_i[mask] / area))
-                iv_bw['rs'] = (1 / slope) * 1e3 if slope != 0 else np.inf
+                slope, *_ = linregress(bw_v[mask], (bw_i[mask] / area))  # dJ/dV
+                iv_bw['rs'] = (1 / slope) * 1e3 if slope != 0 else np.inf  # Ω·cm²
             else:
                 iv_bw['rs'] = np.nan
         except Exception:
             iv_bw['rs'] = np.nan
-        
+
         try:
             voc_fw = iv_fw['voc']; rng = 0.01
             mask = (fw_v > voc_fw - rng) & (fw_v < voc_fw + rng)
             if np.count_nonzero(mask) > 2:
-                slope, *_ = linregress(fw_v[mask], (fw_i[mask] / area))
-                iv_fw['rs'] = (1 / slope) * 1e3 if slope != 0 else np.inf
+                slope, *_ = linregress(fw_v[mask], (fw_i[mask] / area))  # dJ/dV
+                iv_fw['rs'] = (1 / slope) * 1e3 if slope != 0 else np.inf  # Ω·cm²
             else:
                 iv_fw['rs'] = np.nan
         except Exception:
@@ -235,11 +276,11 @@ def calculate_iv_params_per_file(area_lookup, visible_files=None):
     # Layout: dock legend to the right with its own scroll area
     fig.update_layout(
         xaxis_title='Voltage / V',
-        yaxis_title='Current / mA cm⁻²',
+        yaxis_title=y_title,
         hovermode='closest',
         height=600,
         template='plotly_white',
-        margin=dict(l=60, r=300, t=40, b=60),  # extra right margin for a tall legend
+        margin=dict(l=60, r=300, t=40, b=60),
         legend=dict(
             orientation='v',
             yanchor='top', y=1.0,
@@ -247,13 +288,28 @@ def calculate_iv_params_per_file(area_lookup, visible_files=None):
             itemclick='toggle', itemdoubleclick='toggleothers',
             itemsizing='constant',
             font=dict(size=10),
-            # When the legend exceeds the plot height, Plotly provides a scrollbar automatically
         ),
-        uirevision="keep"  # keep legend state while updating
+        uirevision="keep"
     )
+    # Crosshairs
     fig.add_hline(y=0, line_width=1, line_dash="dash", line_color="gray", opacity=0.5)
     fig.add_vline(x=0, line_width=1, line_dash="dash", line_color="gray", opacity=0.5)
-    fig.update_xaxes(range=[-0.1, 1.25]); fig.update_yaxes(range=[-25, 5])
+
+    # Axis ranges
+    fig.update_xaxes(range=[-0.1, 1.25])
+    if plot_mode == 'JV':
+        fig.update_yaxes(range=[-25, 5])
+    else:
+        # Autoscale around data, bias to show zero
+        if pv_min is None or pv_max is None or not np.isfinite(pv_min) or not np.isfinite(pv_max):
+            fig.update_yaxes(autorange=True)
+        else:
+            ymin = min(0.0, pv_min * 1.05)
+            ymax = pv_max * 1.05 if pv_max > 0 else 1.0
+            # Avoid degenerate range
+            if abs(ymax - ymin) < 1e-6:
+                ymax = ymin + 1.0
+            fig.update_yaxes(range=[ymin, ymax])
 
     # Build DataFrame, then rename isc -> jsc and imp -> jmp everywhere visible
     df = pd.json_normalize(iv_list).round(3)
@@ -268,6 +324,7 @@ def calculate_iv_params_per_file(area_lookup, visible_files=None):
     df = df.rename(columns=rename_map)
     st.session_state.df = df
     return fig, df
+
 
 def create_statistics_plot(selected_params, num_columns, selected_groups=None):
     if not st.session_state.groups:
@@ -361,7 +418,7 @@ st.title("JV Curve Analysis")
 st.caption(
     "Import IV `.txt` files containing two columns — voltage (V) and current (mA), for two scans — BW and FW, in that order. "
     "Assign groups and active areas, then calculate JV parameters under standard "
-    "test conditions (100 mW/cm², 1 sun)."
+    "test conditions (100 mW/cm², 1 sun) using NREL iv_params https://github.com/NREL/iv_params."
 )
 st.markdown('---')
 
@@ -457,18 +514,37 @@ with tab1:
         all_files_with_ext = [d['filename'] for d in st.session_state.imported_data]
         st.markdown("**Select files to analyze (uses the active area for each file's group):**")
         selected_for_analysis = st.multiselect('Files', all_files_with_ext, default=all_files_with_ext, label_visibility='collapsed')
-
+        
+        plot_choice = st.radio(
+            "Plot type",
+            ["J–V (current–voltage)", "P–V (power–voltage)"],
+            horizontal=True,
+            key='plot_type_radio'
+        )
+        new_plot_mode = 'JV' if plot_choice.startswith("J–V") else 'PV'
+        
+        # Detect mode change and auto-recalculate
+        if new_plot_mode != st.session_state.plot_mode:
+            st.session_state.plot_mode = new_plot_mode
+            if selected_for_analysis:
+                fig, df = calculate_iv_params_per_file(_build_area_lookup(), selected_for_analysis, plot_mode=new_plot_mode)
+                if fig is not None:
+                    st.session_state.jv_fig = fig
+                    st.session_state.df = df
+        
+        # Update the Analyze button to use st.session_state.plot_mode:
         if st.button('Analyze', type='primary'):
             with st.spinner('Calculating IV parameters...'):
-                fig, df = calculate_iv_params_per_file(_build_area_lookup(), selected_for_analysis)
+                fig, df = calculate_iv_params_per_file(_build_area_lookup(), selected_for_analysis, plot_mode=st.session_state.plot_mode)
                 if fig is not None and df is not None:
-                    st.session_state.jv_fig = fig  # Store the figure in session state
+                    # store separately per mode if you like
+                    st.session_state.jv_fig = fig
+                    st.session_state.df = df
                     st.plotly_chart(fig, use_container_width=True)
                     st.markdown('Results Table')
                     st.dataframe(df, use_container_width=True, height=400)
         elif st.session_state.df is not None:
             st.info('Showing previous results. Click "Analyze" to recalculate.')
-            # Show the stored figure if available
             if 'jv_fig' in st.session_state and st.session_state.jv_fig:
                 st.plotly_chart(st.session_state.jv_fig, use_container_width=True)
             st.markdown('Results Table')
@@ -541,6 +617,45 @@ with tab3:
             st.download_button('📥 Download Excel', data=buf, file_name='iv_params.xlsx',
                                mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
                                use_container_width=True)
+            # Add statistics summary export
+        if st.session_state.groups:
+            st.markdown('---')
+            st.markdown('### 📊 Statistics Summary')
+            
+            # Generate statistics table grouped by group
+            stats_list = []
+            for gname, meta in st.session_state.groups.items():
+                files = set(meta['files'])
+                group_data = st.session_state.df[st.session_state.df['filename'].isin(files)]
+                
+                if not group_data.empty:
+                    # Calculate mean and std for numeric columns
+                    numeric_cols = group_data.select_dtypes(include=[np.number]).columns
+                    stats_row = {'Group': gname, 'N': len(group_data)}
+                    for col in numeric_cols:
+                        if col != 'active_area':
+                            stats_row[f'{col}_mean'] = group_data[col].mean()
+                            stats_row[f'{col}_std'] = group_data[col].std()
+                    stats_list.append(stats_row)
+            
+            if stats_list:
+                stats_df = pd.DataFrame(stats_list).round(3)
+                st.dataframe(stats_df, use_container_width=True)
+                
+                c1, c2, _ = st.columns([1, 1, 2])
+                with c1:
+                    st.download_button('📥 Download Statistics CSV',
+                                       data=stats_df.to_csv(index=False),
+                                       file_name='iv_statistics.csv', mime='text/csv',
+                                       use_container_width=True)
+                with c2:
+                    buf2 = BytesIO()
+                    with pd.ExcelWriter(buf2, engine='openpyxl') as w:
+                        stats_df.to_excel(w, index=False, sheet_name='Statistics')
+                    buf2.seek(0)
+                    st.download_button('📥 Download Statistics Excel', data=buf2,
+                                       file_name='iv_statistics.xlsx',
+                                       mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+                                       use_container_width=True)
     else:
         st.info('Run JV Analysis to generate exportable results.')
-
