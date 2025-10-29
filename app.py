@@ -201,9 +201,9 @@ def calculate_iv_params_per_file(area_lookup, visible_files=None, plot_mode='JV'
         # IV parameters & markers
         try:
             # IV_Params expects current density [mA/cm²] as positive flowing out of device -> use (-i/area)
-            iv_bw = IV_Params(bw_v, bw_i * -1 / area).calc_iv_params()
+            iv_bw = IV_Params(bw_v, bw_i * -1 / area).calc_iv_params(mp_fit_order=9)
             iv_bw['pce'] = iv_bw['isc'] * iv_bw['voc'] * iv_bw['ff'] / 100
-            iv_fw = IV_Params(fw_v, fw_i * -1 / area).calc_iv_params()
+            iv_fw = IV_Params(fw_v, fw_i * -1 / area).calc_iv_params(mp_fit_order=9)
             iv_fw['pce'] = iv_fw['isc'] * iv_fw['voc'] * iv_fw['ff'] / 100
             iv_fw['H'] = (iv_bw['pce'] - iv_fw['pce']) / iv_bw['pce'] if iv_bw['pce'] else 0
 
@@ -659,3 +659,4 @@ with tab3:
                                        use_container_width=True)
     else:
         st.info('Run JV Analysis to generate exportable results.')
+
