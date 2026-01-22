@@ -10,6 +10,7 @@ A Streamlit app for analyzing current-voltage (J-V) characteristics from solar c
 - Organize samples into groups with configurable active areas
 - Interactive J-V and P-V plots
 - Statistical comparison across groups
+- Scan rate analysis: assign scan rates to files and plot parameters vs scan rate
 - Export results to CSV or Excel
 
 ## Installation
