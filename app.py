@@ -490,8 +490,11 @@ def create_scan_rate_plot(selected_param, selected_groups=None, log_scale=False)
 
         if is_bw_param or is_fw_param:
             # Single scan direction parameter
+            base_param = selected_param.replace('bw.', '').replace('fw.', '')
+            multiplier = 100 if base_param in ('ff', 'pce') else 1
+
             scan_rates = group_df['scan_rate'].values
-            values = group_df[selected_param].values
+            values = group_df[selected_param].values * multiplier
             valid = ~np.isnan(values) & ~np.isinf(values)
 
             if np.any(valid):
@@ -508,10 +511,13 @@ def create_scan_rate_plot(selected_param, selected_groups=None, log_scale=False)
             bw_col = f'bw.{selected_param}'
             fw_col = f'fw.{selected_param}'
 
+            # Multiply by 100 for percentage display (ff, pce)
+            multiplier = 100 if selected_param in ('ff', 'pce') else 1
+
             scan_rates = group_df['scan_rate'].values
 
             if bw_col in df.columns:
-                bw_values = group_df[bw_col].values
+                bw_values = group_df[bw_col].values * multiplier
                 valid_bw = ~np.isnan(bw_values) & ~np.isinf(bw_values)
                 if np.any(valid_bw):
                     fig.add_trace(go.Scatter(
@@ -524,7 +530,7 @@ def create_scan_rate_plot(selected_param, selected_groups=None, log_scale=False)
                     ))
 
             if fw_col in df.columns:
-                fw_values = group_df[fw_col].values
+                fw_values = group_df[fw_col].values * multiplier
                 valid_fw = ~np.isnan(fw_values) & ~np.isinf(fw_values)
                 if np.any(valid_fw):
                     fig.add_trace(go.Scatter(
