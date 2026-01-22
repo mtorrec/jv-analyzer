@@ -685,52 +685,59 @@ with st.expander("Group management"):
                     _auto_calculate()
                     st.rerun()
 
-        # Per-file scan rate overrides
-        with st.expander('⚡ Per-file scan rate overrides (optional)'):
-            st.caption('Override the group scan rate for specific files')
-            files_in_groups = []
-            for meta in st.session_state.groups.values():
-                files_in_groups.extend(meta['files'])
-            files_in_groups = list(set(files_in_groups))
+        # Per-file scan rate assignment
+        with st.expander('⚡ Per-file scan rates'):
+            if sel_group and st.session_state.groups[sel_group]['files']:
+                group_files = st.session_state.groups[sel_group]['files']
+                group_default = st.session_state.groups[sel_group].get('scan_rate', st.session_state.default_scan_rate)
 
-            if files_in_groups:
-                override_file = st.selectbox('Select file', [''] + sorted(files_in_groups), key='override_file_select')
-                if override_file:
-                    current_override = st.session_state.file_scan_rates.get(override_file, None)
-                    # Find group default for this file
-                    group_default = st.session_state.default_scan_rate
-                    for gname, meta in st.session_state.groups.items():
-                        if override_file in meta['files']:
-                            group_default = meta.get('scan_rate', st.session_state.default_scan_rate)
-                            break
+                st.markdown(f'**Files in {sel_group}:**')
+                # Show file list with current scan rates
+                file_display = []
+                current_rates = []
+                for f in group_files:
+                    rate = st.session_state.file_scan_rates.get(f, group_default)
+                    current_rates.append(str(rate))
+                    file_display.append(f'`{f}`')
 
-                    col1, col2 = st.columns([2, 1])
-                    with col1:
-                        new_override = st.number_input(
-                            f'Scan rate for {override_file} [mV/s]',
-                            min_value=0.0,
-                            value=float(current_override if current_override else group_default),
-                            step=10.0, format="%.1f",
-                            key='file_scan_rate_override',
-                            help=f'Group default: {group_default:.1f} mV/s'
-                        )
-                    with col2:
-                        if st.button('Set override', use_container_width=True, key='set_override'):
-                            st.session_state.file_scan_rates[override_file] = float(new_override)
-                            _auto_calculate()
-                            st.success(f'Override set for {override_file}')
-                        if current_override and st.button('Clear override', use_container_width=True, key='clear_override'):
-                            del st.session_state.file_scan_rates[override_file]
-                            _auto_calculate()
-                            st.success(f'Override cleared for {override_file}')
+                st.caption(', '.join(file_display))
 
-                # Show current overrides
-                if st.session_state.file_scan_rates:
-                    st.markdown('**Current overrides:**')
-                    for f, rate in st.session_state.file_scan_rates.items():
-                        st.caption(f'• {f}: {rate:.1f} mV/s')
+                st.markdown('**Scan rates [mV/s]:**')
+                st.caption('Enter values in the same order as files above, separated by commas')
+
+                rates_input = st.text_input(
+                    'Scan rates',
+                    value=', '.join(current_rates),
+                    key=f'scan_rates_input_{sel_group}',
+                    label_visibility='collapsed',
+                    placeholder='e.g., 10, 100, 1000'
+                )
+
+                col1, col2 = st.columns([1, 1])
+                with col1:
+                    if st.button('💾 Apply scan rates', use_container_width=True, key='apply_scan_rates'):
+                        try:
+                            # Parse comma-separated values
+                            rates = [float(r.strip()) for r in rates_input.split(',') if r.strip()]
+                            if len(rates) != len(group_files):
+                                st.error(f'Expected {len(group_files)} values, got {len(rates)}')
+                            else:
+                                for f, rate in zip(group_files, rates):
+                                    st.session_state.file_scan_rates[f] = rate
+                                _auto_calculate()
+                                st.success('Scan rates applied.')
+                        except ValueError:
+                            st.error('Invalid input. Use comma-separated numbers (e.g., 10, 100, 1000)')
+                with col2:
+                    if st.button('🔄 Reset to group default', use_container_width=True, key='reset_scan_rates'):
+                        for f in group_files:
+                            if f in st.session_state.file_scan_rates:
+                                del st.session_state.file_scan_rates[f]
+                        _auto_calculate()
+                        st.success('Reset to group default.')
+                        st.rerun()
             else:
-                st.info('Assign files to groups first.')
+                st.info('Select a group with files to set scan rates.')
 
         with st.expander('📋 Groups summary'):
             for gname, meta in st.session_state.groups.items():
