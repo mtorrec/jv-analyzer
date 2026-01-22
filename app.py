@@ -28,6 +28,10 @@ if 'df' not in st.session_state:
     st.session_state.df = None
 if 'default_area' not in st.session_state:
     st.session_state.default_area = 0.1  # used to create first group + fallback
+if 'voltage_col' not in st.session_state:
+    st.session_state.voltage_col = 1  # 1-indexed for user display
+if 'current_col' not in st.session_state:
+    st.session_state.current_col = 2  # 1-indexed for user display
 
 # ---------- Helpers ----------
 def is_numeric_line(line: str) -> bool:
@@ -156,7 +160,9 @@ def calculate_iv_params_per_file(area_lookup, visible_files=None, plot_mode='JV'
         txt.text(f'Analyzing {idx + 1}/{len(data)}: {d["filename"]}')
 
         base, arr = d['base'], d['data']
-        (bw_v, bw_i), (fw_v, fw_i) = split_forward_backward(arr[0], arr[1])
+        v_col = st.session_state.voltage_col - 1  # Convert to 0-indexed
+        i_col = st.session_state.current_col - 1
+        (bw_v, bw_i), (fw_v, fw_i) = split_forward_backward(arr[v_col], arr[i_col])
 
         area = float(area_lookup.get(base, st.session_state.default_area))
         if area <= 0:
@@ -435,10 +441,29 @@ with top1:
     )
 
 # Upload (auto-import). The small "X" now also removes from analysis
-uploaded_files = st.file_uploader(
-    "📁 Upload IV data files (auto-imports)",
-    type=['txt'], accept_multiple_files=True, key='file_uploader'
-)
+upload_col, settings_col = st.columns([20, 1])
+with upload_col:
+    uploaded_files = st.file_uploader(
+        "📁 Upload IV data files (auto-imports)",
+        type=['txt'], accept_multiple_files=True, key='file_uploader'
+    )
+with settings_col:
+    st.write("")  # Spacing to align with uploader
+    with st.popover("⚙️", help="Column settings"):
+        st.markdown("**Column Assignment**")
+        st.caption("Specify which columns contain V and I data")
+        st.session_state.voltage_col = st.number_input(
+            "Voltage column",
+            min_value=1, value=st.session_state.voltage_col,
+            step=1, key='voltage_col_input',
+            help="Column number for voltage (1 = first column)"
+        )
+        st.session_state.current_col = st.number_input(
+            "Current column",
+            min_value=1, value=st.session_state.current_col,
+            step=1, key='current_col_input',
+            help="Column number for current (2 = second column)"
+        )
 if uploaded_files:
     import_data(uploaded_files)
 sync_with_uploader(uploaded_files)
