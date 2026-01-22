@@ -650,16 +650,33 @@ with st.expander("Group management"):
         st.markdown('##### Group settings')
         left, right = st.columns([1.5, 2.5])
         with left:
-            sel_group = st.selectbox('Select group', list(st.session_state.groups.keys()), key='group_selector')
+            group_list = list(st.session_state.groups.keys())
+            sel_idx = st.selectbox('Select group', range(len(group_list)),
+                                   format_func=lambda i: group_list[i], key='group_selector')
+            sel_group = group_list[sel_idx] if group_list else None
             if sel_group:
-                ga = st.number_input('Active area [cm²] for this group',
+                # Dynamic key ensures text_input updates when selection changes
+                new_name = st.text_input('Group name', value=sel_group, key=f'grp_name_{sel_idx}')
+                ga = st.number_input('Active area [cm²]',
                                      min_value=0.0,
                                      value=float(st.session_state.groups[sel_group]['active_area']),
-                                     step=0.01, format="%.3f", key='grp_area_editor')
-                if st.button('💾 Save area', use_container_width=True, key='save_group_settings'):
-                    st.session_state.groups[sel_group]['active_area'] = float(ga)
-                    _auto_calculate()
-                    st.success('Saved.')
+                                     step=0.01, format="%.3f", key=f'grp_area_{sel_idx}')
+                if st.button('💾 Save', use_container_width=True, key='save_group_settings'):
+                    if new_name != sel_group:
+                        if not new_name.strip():
+                            st.error('Group name cannot be empty.')
+                        elif new_name in st.session_state.groups:
+                            st.error(f'Group "{new_name}" already exists.')
+                        else:
+                            st.session_state.groups[new_name] = st.session_state.groups.pop(sel_group)
+                            st.session_state.groups[new_name]['active_area'] = float(ga)
+                            _auto_calculate()
+                            st.success(f'Renamed and saved.')
+                            st.rerun()
+                    else:
+                        st.session_state.groups[sel_group]['active_area'] = float(ga)
+                        _auto_calculate()
+                        st.success('Saved.')
         with right:
             if sel_group:
                 all_bases = [d['base'] for d in st.session_state.imported_data]
