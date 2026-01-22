@@ -33,7 +33,7 @@ if 'voltage_col' not in st.session_state:
 if 'current_col' not in st.session_state:
     st.session_state.current_col = 2  # 1-indexed for user display
 if 'default_scan_rate' not in st.session_state:
-    st.session_state.default_scan_rate = 100.0  # mV/s
+    st.session_state.default_scan_rate = None  # None = not set
 if 'file_scan_rates' not in st.session_state:
     st.session_state.file_scan_rates = {}  # base -> scan_rate (per-file overrides)
 
@@ -71,7 +71,7 @@ def _ensure_default_group():
         st.session_state.groups['Group 1'] = {
             'files': all_bases,
             'active_area': float(st.session_state.default_area),
-            'scan_rate': float(st.session_state.default_scan_rate)
+            'scan_rate': None  # Not set by default
         }
 
 def _build_area_lookup():
@@ -83,16 +83,16 @@ def _build_area_lookup():
     return lookup
 
 def _build_scan_rate_lookup():
-    """Get scan rate for each file: per-file override > group default > global default."""
+    """Get scan rate for each file: per-file override > group default > None if not set."""
     lookup = {}
     for gname, meta in st.session_state.groups.items():
-        group_rate = float(meta.get('scan_rate', st.session_state.default_scan_rate))
+        group_rate = meta.get('scan_rate')  # Can be None
         for b in meta['files']:
             # Per-file override takes precedence
             if b in st.session_state.file_scan_rates:
                 lookup[b] = float(st.session_state.file_scan_rates[b])
             else:
-                lookup[b] = group_rate
+                lookup[b] = group_rate  # Can be None
     return lookup
 
 def _auto_calculate():
@@ -623,7 +623,8 @@ if st.session_state.imported_data:
 with st.expander("Group management"):
     _ensure_default_group()
 
-    g1, g2, g3, g4 = st.columns([2, 1, 1, 1])
+    st.markdown('##### Create new group')
+    g1, g2, g3 = st.columns([2, 1, 1])
     with g1:
         new_group = st.text_input('New group name', key='new_group_input', placeholder='e.g., Batch A')
     with g2:
@@ -631,10 +632,6 @@ with st.expander("Group management"):
                                          min_value=0.0, value=st.session_state.default_area,
                                          step=0.01, format="%.3f", key='new_group_area')
     with g3:
-        new_group_scan_rate = st.number_input('Scan rate [mV/s]',
-                                              min_value=0.0, value=st.session_state.default_scan_rate,
-                                              step=10.0, format="%.1f", key='new_group_scan_rate')
-    with g4:
         if st.button('➕ Add Group', use_container_width=True):
             if not new_group:
                 st.warning('Please enter a group name.')
@@ -644,11 +641,13 @@ with st.expander("Group management"):
                 st.session_state.groups[new_group] = {
                     'files': [],
                     'active_area': float(new_group_area),
-                    'scan_rate': float(new_group_scan_rate)
+                    'scan_rate': None  # Set via per-file scan rates
                 }
                 st.success(f'✅ Group "{new_group}" created')
 
     if st.session_state.groups:
+        st.markdown('---')
+        st.markdown('##### Group settings')
         left, right = st.columns([1.5, 2.5])
         with left:
             sel_group = st.selectbox('Select group', list(st.session_state.groups.keys()), key='group_selector')
@@ -657,15 +656,8 @@ with st.expander("Group management"):
                                      min_value=0.0,
                                      value=float(st.session_state.groups[sel_group]['active_area']),
                                      step=0.01, format="%.3f", key='grp_area_editor')
-                # Get current scan rate, default to global default if not set
-                current_scan_rate = float(st.session_state.groups[sel_group].get('scan_rate', st.session_state.default_scan_rate))
-                gsr = st.number_input('Scan rate [mV/s] for this group',
-                                      min_value=0.0,
-                                      value=current_scan_rate,
-                                      step=10.0, format="%.1f", key='grp_scan_rate_editor')
-                if st.button('💾 Save group settings', use_container_width=True, key='save_group_settings'):
+                if st.button('💾 Save area', use_container_width=True, key='save_group_settings'):
                     st.session_state.groups[sel_group]['active_area'] = float(ga)
-                    st.session_state.groups[sel_group]['scan_rate'] = float(gsr)
                     _auto_calculate()
                     st.success('Saved.')
         with right:
@@ -689,15 +681,19 @@ with st.expander("Group management"):
         with st.expander('⚡ Per-file scan rates'):
             if sel_group and st.session_state.groups[sel_group]['files']:
                 group_files = st.session_state.groups[sel_group]['files']
-                group_default = st.session_state.groups[sel_group].get('scan_rate', st.session_state.default_scan_rate)
 
                 st.markdown(f'**Files in {sel_group}:**')
                 # Show file list with current scan rates
                 file_display = []
                 current_rates = []
+                has_rates = False
                 for f in group_files:
-                    rate = st.session_state.file_scan_rates.get(f, group_default)
-                    current_rates.append(str(rate))
+                    rate = st.session_state.file_scan_rates.get(f)
+                    if rate is not None:
+                        current_rates.append(str(rate))
+                        has_rates = True
+                    else:
+                        current_rates.append('')
                     file_display.append(f'`{f}`')
 
                 st.caption(', '.join(file_display))
@@ -707,7 +703,7 @@ with st.expander("Group management"):
 
                 rates_input = st.text_input(
                     'Scan rates',
-                    value=', '.join(current_rates),
+                    value=', '.join(current_rates) if has_rates else '',
                     key=f'scan_rates_input_{sel_group}',
                     label_visibility='collapsed',
                     placeholder='e.g., 10, 100, 1000'
@@ -716,35 +712,52 @@ with st.expander("Group management"):
                 col1, col2 = st.columns([1, 1])
                 with col1:
                     if st.button('💾 Apply scan rates', use_container_width=True, key='apply_scan_rates'):
-                        try:
-                            # Parse comma-separated values
-                            rates = [float(r.strip()) for r in rates_input.split(',') if r.strip()]
-                            if len(rates) != len(group_files):
-                                st.error(f'Expected {len(group_files)} values, got {len(rates)}')
-                            else:
-                                for f, rate in zip(group_files, rates):
-                                    st.session_state.file_scan_rates[f] = rate
-                                _auto_calculate()
-                                st.success('Scan rates applied.')
-                        except ValueError:
-                            st.error('Invalid input. Use comma-separated numbers (e.g., 10, 100, 1000)')
+                        if not rates_input.strip():
+                            st.warning('Please enter scan rate values.')
+                        else:
+                            try:
+                                # Parse comma-separated values
+                                rates = [float(r.strip()) for r in rates_input.split(',') if r.strip()]
+                                if len(rates) != len(group_files):
+                                    st.error(f'Expected {len(group_files)} values, got {len(rates)}')
+                                else:
+                                    for f, rate in zip(group_files, rates):
+                                        st.session_state.file_scan_rates[f] = rate
+                                    _auto_calculate()
+                                    st.success('Scan rates applied.')
+                            except ValueError:
+                                st.error('Invalid input. Use comma-separated numbers (e.g., 10, 100, 1000)')
                 with col2:
-                    if st.button('🔄 Reset to group default', use_container_width=True, key='reset_scan_rates'):
+                    if has_rates and st.button('🗑️ Clear scan rates', use_container_width=True, key='clear_scan_rates'):
                         for f in group_files:
                             if f in st.session_state.file_scan_rates:
                                 del st.session_state.file_scan_rates[f]
                         _auto_calculate()
-                        st.success('Reset to group default.')
+                        st.success('Scan rates cleared.')
                         st.rerun()
             else:
                 st.info('Select a group with files to set scan rates.')
 
         with st.expander('📋 Groups summary'):
             for gname, meta in st.session_state.groups.items():
-                scan_rate = meta.get('scan_rate', st.session_state.default_scan_rate)
-                st.markdown(f"- **{gname}** — area: `{meta['active_area']:.3f} cm²` — scan rate: `{scan_rate:.1f} mV/s` — {len(meta['files'])} file(s)")
+                # Check if any files in group have scan rates
+                group_files = meta['files']
+                rates_set = [f for f in group_files if f in st.session_state.file_scan_rates]
+                if rates_set:
+                    rates_display = f'{len(rates_set)}/{len(group_files)} files'
+                else:
+                    rates_display = 'n/a'
+                st.markdown(f"- **{gname}** — area: `{meta['active_area']:.3f} cm²` — scan rates: `{rates_display}` — {len(meta['files'])} file(s)")
                 if meta['files']:
-                    st.caption(", ".join(meta['files']))
+                    # Show files with their scan rates
+                    file_info = []
+                    for f in meta['files']:
+                        rate = st.session_state.file_scan_rates.get(f)
+                        if rate is not None:
+                            file_info.append(f'{f} ({rate} mV/s)')
+                        else:
+                            file_info.append(f)
+                    st.caption(', '.join(file_info))
 
 st.markdown('---')
 
