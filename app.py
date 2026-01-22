@@ -32,6 +32,10 @@ if 'voltage_col' not in st.session_state:
     st.session_state.voltage_col = 1  # 1-indexed for user display
 if 'current_col' not in st.session_state:
     st.session_state.current_col = 2  # 1-indexed for user display
+if 'default_scan_rate' not in st.session_state:
+    st.session_state.default_scan_rate = 100.0  # mV/s
+if 'file_scan_rates' not in st.session_state:
+    st.session_state.file_scan_rates = {}  # base -> scan_rate (per-file overrides)
 
 # ---------- Helpers ----------
 def is_numeric_line(line: str) -> bool:
@@ -66,7 +70,8 @@ def _ensure_default_group():
         all_bases = [d['base'] for d in st.session_state.imported_data]
         st.session_state.groups['Group 1'] = {
             'files': all_bases,
-            'active_area': float(st.session_state.default_area)
+            'active_area': float(st.session_state.default_area),
+            'scan_rate': float(st.session_state.default_scan_rate)
         }
 
 def _build_area_lookup():
@@ -77,11 +82,24 @@ def _build_area_lookup():
             lookup[b] = area
     return lookup
 
+def _build_scan_rate_lookup():
+    """Get scan rate for each file: per-file override > group default > global default."""
+    lookup = {}
+    for gname, meta in st.session_state.groups.items():
+        group_rate = float(meta.get('scan_rate', st.session_state.default_scan_rate))
+        for b in meta['files']:
+            # Per-file override takes precedence
+            if b in st.session_state.file_scan_rates:
+                lookup[b] = float(st.session_state.file_scan_rates[b])
+            else:
+                lookup[b] = group_rate
+    return lookup
+
 def _auto_calculate():
     if not st.session_state.imported_data:
         st.session_state.df = None
         return
-    calculate_iv_params_per_file(_build_area_lookup())
+    calculate_iv_params_per_file(_build_area_lookup(), scan_rate_lookup=_build_scan_rate_lookup())
 
 def import_data(uploaded_files):
     """Import any new files in the uploader; skip duplicates."""
@@ -133,7 +151,7 @@ def sync_with_uploader(uploaded_files):
             st.session_state.groups[g]['files'] = [b for b in st.session_state.groups[g]['files'] if b != base]
     _auto_calculate()
 
-def calculate_iv_params_per_file(area_lookup, visible_files=None, plot_mode='JV'):
+def calculate_iv_params_per_file(area_lookup, visible_files=None, plot_mode='JV', scan_rate_lookup=None):
     if not st.session_state.imported_data:
         st.warning('No data imported yet.')
         return None, None
@@ -145,6 +163,10 @@ def calculate_iv_params_per_file(area_lookup, visible_files=None, plot_mode='JV'
     if not data:
         st.warning('No files selected for analysis.')
         return None, None
+
+    # Build scan rate lookup if not provided
+    if scan_rate_lookup is None:
+        scan_rate_lookup = _build_scan_rate_lookup()
 
     fig = go.Figure()
     iv_list = []
@@ -270,11 +292,13 @@ def calculate_iv_params_per_file(area_lookup, visible_files=None, plot_mode='JV'
         except Exception:
             iv_fw['rs'] = np.nan
 
+        scan_rate = scan_rate_lookup.get(base, st.session_state.default_scan_rate)
         iv_list.append({
             'bw': iv_bw, 'fw': iv_fw,
             'filename': base,
             'group': next((g for g, meta in st.session_state.groups.items() if base in meta['files']), None),
-            'active_area': area
+            'active_area': area,
+            'scan_rate': scan_rate
         })
 
     bar.empty(); txt.empty()
@@ -419,6 +443,129 @@ def create_statistics_plot(selected_params, num_columns, selected_groups=None):
     return fig
 
 
+def create_scan_rate_plot(selected_param, selected_groups=None, log_scale=False):
+    """Create a plot of parameter vs scan rate for each group, with BW and FW traces."""
+    if not st.session_state.groups:
+        st.warning('No groups defined.')
+        return None
+    if not selected_param:
+        st.warning('No parameter selected.')
+        return None
+    df = st.session_state.df
+    if df is None or df.empty:
+        st.warning('No analysis results available.')
+        return None
+    if 'scan_rate' not in df.columns:
+        st.warning('Scan rate data not available. Please re-run analysis.')
+        return None
+
+    # Filter groups if specified
+    groups_to_plot = st.session_state.groups
+    if selected_groups:
+        groups_to_plot = {k: v for k, v in st.session_state.groups.items() if k in selected_groups}
+
+    if not groups_to_plot:
+        st.warning('No groups selected.')
+        return None
+
+    # Determine if param is BW, FW, or general
+    is_bw_param = selected_param.startswith('bw.')
+    is_fw_param = selected_param.startswith('fw.')
+
+    fig = go.Figure()
+
+    # Create consistent color mapping for groups
+    group_names = list(st.session_state.groups.keys())
+    group_colors = get_color_palette(len(group_names))
+    color_map = dict(zip(group_names, group_colors))
+
+    for gname, meta in groups_to_plot.items():
+        files = set(meta['files'])
+        group_df = df[df['filename'].isin(files)]
+
+        if group_df.empty:
+            continue
+
+        color = color_map[gname]
+
+        if is_bw_param or is_fw_param:
+            # Single scan direction parameter
+            scan_rates = group_df['scan_rate'].values
+            values = group_df[selected_param].values
+            valid = ~np.isnan(values) & ~np.isinf(values)
+
+            if np.any(valid):
+                fig.add_trace(go.Scatter(
+                    x=scan_rates[valid], y=values[valid],
+                    mode='markers+lines',
+                    name=f'{gname}',
+                    marker=dict(size=8, color=color),
+                    line=dict(color=color, width=2),
+                    legendgroup=gname
+                ))
+        else:
+            # Plot both BW and FW versions if they exist
+            bw_col = f'bw.{selected_param}'
+            fw_col = f'fw.{selected_param}'
+
+            scan_rates = group_df['scan_rate'].values
+
+            if bw_col in df.columns:
+                bw_values = group_df[bw_col].values
+                valid_bw = ~np.isnan(bw_values) & ~np.isinf(bw_values)
+                if np.any(valid_bw):
+                    fig.add_trace(go.Scatter(
+                        x=scan_rates[valid_bw], y=bw_values[valid_bw],
+                        mode='markers+lines',
+                        name=f'{gname} (BW)',
+                        marker=dict(size=8, color=color),
+                        line=dict(color=color, width=2),
+                        legendgroup=gname
+                    ))
+
+            if fw_col in df.columns:
+                fw_values = group_df[fw_col].values
+                valid_fw = ~np.isnan(fw_values) & ~np.isinf(fw_values)
+                if np.any(valid_fw):
+                    fig.add_trace(go.Scatter(
+                        x=scan_rates[valid_fw], y=fw_values[valid_fw],
+                        mode='markers+lines',
+                        name=f'{gname} (FW)',
+                        marker=dict(size=8, color=color, symbol='diamond'),
+                        line=dict(color=color, width=2, dash='dash'),
+                        legendgroup=gname
+                    ))
+
+    # Format parameter name for y-axis
+    y_title = selected_param.replace('bw.', '').replace('fw.', '')
+    y_units = {
+        'jsc': 'mA/cm²', 'voc': 'V', 'ff': '%', 'pce': '%',
+        'jmp': 'mA/cm²', 'vmp': 'V', 'rs': 'Ω·cm²'
+    }
+    unit = y_units.get(y_title, '')
+    if unit:
+        y_title = f'{y_title} / {unit}'
+
+    fig.update_layout(
+        xaxis_title='Scan rate / mV s⁻¹',
+        yaxis_title=y_title,
+        hovermode='closest',
+        height=500,
+        template='plotly_white',
+        legend=dict(
+            orientation='v',
+            yanchor='top', y=1.0,
+            xanchor='left', x=1.02
+        ),
+        margin=dict(l=60, r=200, t=40, b=60)
+    )
+
+    if log_scale:
+        fig.update_xaxes(type='log')
+
+    return fig
+
+
 # ---------- UI ----------
 st.title("JV Curve Analysis")
 st.caption(
@@ -476,22 +623,30 @@ if st.session_state.imported_data:
 with st.expander("Group management"):
     _ensure_default_group()
 
-    g1, g2, g3 = st.columns([2, 1, 1])
+    g1, g2, g3, g4 = st.columns([2, 1, 1, 1])
     with g1:
         new_group = st.text_input('New group name', key='new_group_input', placeholder='e.g., Batch A')
     with g2:
-        new_group_area = st.number_input('Active area [cm²] for new group',
+        new_group_area = st.number_input('Active area [cm²]',
                                          min_value=0.0, value=st.session_state.default_area,
                                          step=0.01, format="%.3f", key='new_group_area')
     with g3:
+        new_group_scan_rate = st.number_input('Scan rate [mV/s]',
+                                              min_value=0.0, value=st.session_state.default_scan_rate,
+                                              step=10.0, format="%.1f", key='new_group_scan_rate')
+    with g4:
         if st.button('➕ Add Group', use_container_width=True):
             if not new_group:
                 st.warning('Please enter a group name.')
             elif new_group in st.session_state.groups:
                 st.warning('Group already exists.')
             else:
-                st.session_state.groups[new_group] = {'files': [], 'active_area': float(new_group_area)}
-                st.success(f'✅ Group "{new_group}" created (area={new_group_area:.3f} cm²)')
+                st.session_state.groups[new_group] = {
+                    'files': [],
+                    'active_area': float(new_group_area),
+                    'scan_rate': float(new_group_scan_rate)
+                }
+                st.success(f'✅ Group "{new_group}" created')
 
     if st.session_state.groups:
         left, right = st.columns([1.5, 2.5])
@@ -502,8 +657,15 @@ with st.expander("Group management"):
                                      min_value=0.0,
                                      value=float(st.session_state.groups[sel_group]['active_area']),
                                      step=0.01, format="%.3f", key='grp_area_editor')
-                if st.button('💾 Save group area', use_container_width=True, key='save_group_area'):
+                # Get current scan rate, default to global default if not set
+                current_scan_rate = float(st.session_state.groups[sel_group].get('scan_rate', st.session_state.default_scan_rate))
+                gsr = st.number_input('Scan rate [mV/s] for this group',
+                                      min_value=0.0,
+                                      value=current_scan_rate,
+                                      step=10.0, format="%.1f", key='grp_scan_rate_editor')
+                if st.button('💾 Save group settings', use_container_width=True, key='save_group_settings'):
                     st.session_state.groups[sel_group]['active_area'] = float(ga)
+                    st.session_state.groups[sel_group]['scan_rate'] = float(gsr)
                     _auto_calculate()
                     st.success('Saved.')
         with right:
@@ -523,16 +685,64 @@ with st.expander("Group management"):
                     _auto_calculate()
                     st.rerun()
 
+        # Per-file scan rate overrides
+        with st.expander('⚡ Per-file scan rate overrides (optional)'):
+            st.caption('Override the group scan rate for specific files')
+            files_in_groups = []
+            for meta in st.session_state.groups.values():
+                files_in_groups.extend(meta['files'])
+            files_in_groups = list(set(files_in_groups))
+
+            if files_in_groups:
+                override_file = st.selectbox('Select file', [''] + sorted(files_in_groups), key='override_file_select')
+                if override_file:
+                    current_override = st.session_state.file_scan_rates.get(override_file, None)
+                    # Find group default for this file
+                    group_default = st.session_state.default_scan_rate
+                    for gname, meta in st.session_state.groups.items():
+                        if override_file in meta['files']:
+                            group_default = meta.get('scan_rate', st.session_state.default_scan_rate)
+                            break
+
+                    col1, col2 = st.columns([2, 1])
+                    with col1:
+                        new_override = st.number_input(
+                            f'Scan rate for {override_file} [mV/s]',
+                            min_value=0.0,
+                            value=float(current_override if current_override else group_default),
+                            step=10.0, format="%.1f",
+                            key='file_scan_rate_override',
+                            help=f'Group default: {group_default:.1f} mV/s'
+                        )
+                    with col2:
+                        if st.button('Set override', use_container_width=True, key='set_override'):
+                            st.session_state.file_scan_rates[override_file] = float(new_override)
+                            _auto_calculate()
+                            st.success(f'Override set for {override_file}')
+                        if current_override and st.button('Clear override', use_container_width=True, key='clear_override'):
+                            del st.session_state.file_scan_rates[override_file]
+                            _auto_calculate()
+                            st.success(f'Override cleared for {override_file}')
+
+                # Show current overrides
+                if st.session_state.file_scan_rates:
+                    st.markdown('**Current overrides:**')
+                    for f, rate in st.session_state.file_scan_rates.items():
+                        st.caption(f'• {f}: {rate:.1f} mV/s')
+            else:
+                st.info('Assign files to groups first.')
+
         with st.expander('📋 Groups summary'):
             for gname, meta in st.session_state.groups.items():
-                st.markdown(f"- **{gname}** — area: `{meta['active_area']:.3f} cm²` — {len(meta['files'])} file(s)")
+                scan_rate = meta.get('scan_rate', st.session_state.default_scan_rate)
+                st.markdown(f"- **{gname}** — area: `{meta['active_area']:.3f} cm²` — scan rate: `{scan_rate:.1f} mV/s` — {len(meta['files'])} file(s)")
                 if meta['files']:
                     st.caption(", ".join(meta['files']))
 
 st.markdown('---')
 
 # ---------- Tabs ----------
-tab1, tab2, tab3 = st.tabs(['☀️ JV Analysis', '📊 Statistics', '📥 Export'])
+tab1, tab2, tab3, tab4 = st.tabs(['☀️ JV Analysis', '📊 Statistics', '⚡ Scan Rate Analysis', '📥 Export'])
 
 with tab1:
     if st.session_state.imported_data:
@@ -591,7 +801,7 @@ with tab2:
         c1, c2 = st.columns([3, 1])
         with c1:
             params = [c for c in st.session_state.df.columns
-                      if c not in ('filename', 'group', 'active_area')]
+                      if c not in ('filename', 'group', 'active_area', 'scan_rate')]
             picked = st.multiselect(
                 '**Select parameters to plot by group:**',
                 params,
@@ -625,6 +835,67 @@ with tab2:
 
 
 with tab3:
+    if st.session_state.df is not None and st.session_state.groups:
+        # Check if we have scan rate variation
+        unique_rates = st.session_state.df['scan_rate'].nunique() if 'scan_rate' in st.session_state.df.columns else 0
+
+        if unique_rates < 2:
+            st.info('Scan rate analysis requires files with different scan rates. Assign different scan rates to groups or files in "Group management".')
+        else:
+            # Group filter
+            all_groups = list(st.session_state.groups.keys())
+            selected_groups_sr = st.multiselect(
+                '**Select groups to display:**',
+                all_groups,
+                default=all_groups,
+                key='scan_rate_group_filter'
+            )
+
+            # Parameter selection - show base parameters (will plot BW and FW)
+            base_params = ['jsc', 'voc', 'ff', 'pce', 'jmp', 'vmp', 'rs']
+            available_base = [p for p in base_params if f'bw.{p}' in st.session_state.df.columns]
+
+            c1, c2, c3 = st.columns([2, 1, 1])
+            with c1:
+                selected_param_sr = st.selectbox(
+                    '**Select parameter:**',
+                    available_base,
+                    format_func=lambda x: {
+                        'jsc': 'Jsc (short-circuit current)',
+                        'voc': 'Voc (open-circuit voltage)',
+                        'ff': 'FF (fill factor)',
+                        'pce': 'PCE (power conversion efficiency)',
+                        'jmp': 'Jmp (current at MPP)',
+                        'vmp': 'Vmp (voltage at MPP)',
+                        'rs': 'Rs (series resistance)'
+                    }.get(x, x),
+                    key='scan_rate_param_select'
+                )
+            with c2:
+                log_scale = st.checkbox('Log scale (x-axis)', value=True, key='scan_rate_log')
+            with c3:
+                plot_sr = st.button('📈 Plot', type='primary', use_container_width=True, key='plot_scan_rate')
+
+            # Plot area
+            sr_plot_area = st.empty()
+
+            if plot_sr and selected_param_sr:
+                with st.spinner('Creating scan rate plot...'):
+                    fig = create_scan_rate_plot(selected_param_sr, selected_groups_sr, log_scale)
+                    if fig:
+                        st.session_state.scan_rate_fig = fig
+                        sr_plot_area.plotly_chart(fig, use_container_width=True)
+            elif 'scan_rate_fig' in st.session_state and st.session_state.scan_rate_fig:
+                sr_plot_area.plotly_chart(st.session_state.scan_rate_fig, use_container_width=True)
+            else:
+                st.info('Select a parameter and click "Plot" to visualize scan rate dependence.')
+
+    elif not st.session_state.groups:
+        st.info('Add groups in "Group management" to view scan rate analysis.')
+    else:
+        st.info('Run JV Analysis first.')
+
+with tab4:
     if st.session_state.df is not None:
         st.markdown('### 📊 Results Table')
         st.dataframe(st.session_state.df, use_container_width=True)
@@ -658,7 +929,7 @@ with tab3:
                     numeric_cols = group_data.select_dtypes(include=[np.number]).columns
                     stats_row = {'Group': gname, 'N': len(group_data)}
                     for col in numeric_cols:
-                        if col != 'active_area':
+                        if col not in ('active_area', 'scan_rate'):
                             stats_row[f'{col}_mean'] = group_data[col].mean()
                             stats_row[f'{col}_std'] = group_data[col].std()
                     stats_list.append(stats_row)
